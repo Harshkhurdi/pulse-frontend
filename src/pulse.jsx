@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef, useCallback } from 'react';
+import { useState, useEffect, useRef, useCallback } from 'react';
 import { supabase } from './supabaseClient';
 import {
   Activity,
@@ -794,11 +794,15 @@ export default function PulseApp({ userId, userEmail }) {
       const upd = localStorage.getItem('pulse:update');
       if (upd) {
         const parsed = JSON.parse(upd);
+        // This restores persisted UI state once after the component mounts.
+        // eslint-disable-next-line react-hooks/set-state-in-effect
         setUpdateData(parsed.data);
         setGeneratedAt(parsed.generatedAt);
         setPanelOpen(true);
       }
-    } catch (e) {}
+    } catch {
+      // Ignore a malformed cache and fetch fresh data instead.
+    }
 
     fetchTasks();
     return () => { cancelled = true; };
@@ -1012,7 +1016,11 @@ export default function PulseApp({ userId, userEmail }) {
       setUpdateData(parsed);
       const ts = new Date().toISOString();
       setGeneratedAt(ts);
-      try { localStorage.setItem('pulse:update', JSON.stringify({ data: parsed, generatedAt: ts })); } catch (e) {}
+      try {
+        localStorage.setItem('pulse:update', JSON.stringify({ data: parsed, generatedAt: ts }));
+      } catch {
+        // Caching is optional; the generated update remains visible.
+      }
     } catch (e) {
       console.error("Pulse API Failure:", e);
 
