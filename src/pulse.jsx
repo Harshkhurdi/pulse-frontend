@@ -13,6 +13,7 @@ import {
   GripVertical,
   Pencil,
   Trash2,
+  Download,
 } from 'lucide-react';
 import {
   DndContext,
@@ -150,6 +151,13 @@ function GlobalStyles() {
         transition: border-color 0.15s ease, color 0.15s ease;
       }
       .btn-logout:hover { color: var(--risk); border-color: var(--risk); background: var(--risk-dim); }
+      .btn-export {
+        display: flex; align-items: center; gap: 6px;
+        background: none; border: 1px solid var(--hairline); color: var(--muted);
+        padding: 8px 14px; border-radius: var(--radius-md); font-size: 12.5px; font-weight: 500;
+        transition: border-color 0.15s ease, color 0.15s ease, background 0.15s ease;
+      }
+      .btn-export:hover { color: var(--ink); border-color: var(--muted); background: var(--surface-2); }
       .spin { animation: spin 0.9s linear infinite; }
       @keyframes spin { to { transform: rotate(360deg); } }
 
@@ -1021,6 +1029,24 @@ export default function PulseApp({ userId, userEmail }) {
     }
   };
 
+  const exportBoardToJSON = () => {
+    const exportData = {
+      exportedAt: new Date().toISOString(),
+      taskCount: tasks.length,
+      tasks: tasks,
+    };
+    const jsonString = JSON.stringify(exportData, null, 2);
+    const blob = new Blob([jsonString], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `pulse-board-export-${new Date().toISOString().slice(0, 10)}.json`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  };
+
   if (!ready) {
     return (
       <div className="pulse-root">
@@ -1051,6 +1077,9 @@ export default function PulseApp({ userId, userEmail }) {
           <button className="btn-generate" onClick={generateUpdate} disabled={generating}>
             {generating ? <Loader2 size={14} className="spin" /> : <Activity size={14} />}
             {generating ? 'Reading board…' : 'Generate update'}
+          </button>
+          <button className="btn-export" onClick={exportBoardToJSON} title="Export Board to JSON">
+            <Download size={14} /> Export JSON
           </button>
           <button className="btn-logout" onClick={() => supabase.auth.signOut()}>
             Log out
