@@ -14,7 +14,7 @@ export default function App() {
       setLoading(false);
     });
 
-    // Listen for auth state changes (login, logout, token refresh)
+    // Listen for auth state changes (login, logout, token refresh, OAuth redirect)
     const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, session) => {
       setSession(session);
     });
@@ -119,7 +119,7 @@ export default function App() {
           grid-template-columns: 1fr auto 1fr;
           align-items: center;
           width: 100%;
-          margin-bottom: 32px;
+          margin-bottom: 24px;
         }
         .auth-brand svg {
           grid-column: 1;
@@ -134,6 +134,51 @@ export default function App() {
           letter-spacing: -0.01em;
           color: var(--ink);
           line-height: 1;
+        }
+        .auth-oauth {
+          margin-bottom: 20px;
+        }
+        .btn-google {
+          width: 100%;
+          display: flex;
+          align-items: center;
+          justify-content: center;
+          padding: 10px 16px;
+          background: #ffffff;
+          color: #1f2937;
+          border: 1px solid #e5e7eb;
+          border-radius: var(--radius-md);
+          font-size: 13.5px;
+          font-weight: 600;
+          cursor: pointer;
+          transition: background 0.15s ease, transform 0.15s ease;
+        }
+        .btn-google:hover:not(:disabled) {
+          background: #f9fafb;
+          transform: translateY(-1px);
+        }
+        .btn-google:disabled {
+          opacity: 0.6;
+          cursor: progress;
+        }
+        .auth-divider {
+          display: flex;
+          align-items: center;
+          text-align: center;
+          margin-bottom: 20px;
+          color: var(--muted);
+          font-size: 11px;
+          text-transform: uppercase;
+          letter-spacing: 0.05em;
+        }
+        .auth-divider::before,
+        .auth-divider::after {
+          content: '';
+          flex: 1;
+          border-bottom: 1px solid var(--hairline);
+        }
+        .auth-divider span {
+          padding: 0 10px;
         }
         .auth-field { margin-bottom: 16px; }
         .auth-field label {
@@ -229,7 +274,7 @@ export default function App() {
   return (
     <div className="pulse-root">
       {Branding}
-      <PulseApp userId={session.user.id} />
+      <PulseApp userId={session.user.id} userEmail={session.user.email} />
     </div>
   );
 }

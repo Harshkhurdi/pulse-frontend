@@ -635,11 +635,51 @@ function TaskModal({ initial, defaultStatus, onSave, onDelete, onClose }) {
    AI status update panel
 --------------------------------------------------------- */
 function UpdatePanel({ data, loading, error, open, onToggle, generatedAt }) {
+  const [copied, setCopied] = useState(false);
+
+  const handleCopyUpdate = () => {
+    if (!data) return;
+    const text = `Pulse Status Update (${generatedAt ? new Date(generatedAt).toLocaleDateString() : 'Today'})
+Summary: ${data.summary || ''}
+
+Shipped:
+${(data.shipped || []).map(s => `- ${s}`).join('\n')}
+
+In Progress:
+${(data.inProgress || []).map(s => `- ${s}`).join('\n')}
+
+At Risk:
+${(data.atRisk || []).map(r => `- ${r.title}: ${r.reasoning}`).join('\n')}
+`;
+    navigator.clipboard.writeText(text);
+    setCopied(true);
+    setTimeout(() => setCopied(false), 2000);
+  };
+
   return (
     <div className="update-panel">
       <button className="update-header" onClick={onToggle} aria-expanded={open}>
         <span className="update-title"><Activity size={14} /> Status update</span>
-        {generatedAt ? <span className="update-meta mono">Updated {relativeTime(generatedAt)}</span> : null}
+        <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
+          {data ? (
+            <button
+              onClick={(e) => { e.stopPropagation(); handleCopyUpdate(); }}
+              style={{
+                background: 'rgba(65, 214, 224, 0.12)',
+                color: 'var(--live)',
+                border: '1px solid rgba(65, 214, 224, 0.3)',
+                padding: '3px 10px',
+                borderRadius: '6px',
+                fontSize: '11px',
+                cursor: 'pointer',
+                fontWeight: 600
+              }}
+            >
+              {copied ? '✓ Copied' : 'Copy report'}
+            </button>
+          ) : null}
+          {generatedAt ? <span className="update-meta mono">Updated {relativeTime(generatedAt)}</span> : null}
+        </div>
       </button>
       {open ? (
         <div className="update-body">
@@ -682,7 +722,7 @@ function UpdatePanel({ data, loading, error, open, onToggle, generatedAt }) {
 /* ---------------------------------------------------------
    Main app
 --------------------------------------------------------- */
-export default function PulseApp({ userId }) {
+export default function PulseApp({ userId, userEmail }) {
   const [tasks, setTasks] = useState([]);
   const [ready, setReady] = useState(false);
   const [modal, setModal] = useState(null);
@@ -1002,6 +1042,11 @@ export default function PulseApp({ userId }) {
           <PulseWave width={48} height={18} />
         </div>
         <div className="pulse-actions">
+          {userEmail ? (
+            <span className="pulse-status-chip mono" style={{ opacity: 0.8, color: 'var(--muted)' }}>
+              {userEmail}
+            </span>
+          ) : null}
           <span className="pulse-status-chip mono"><span className="pulse-dot" />{tasks.length} tasks</span>
           <button className="btn-generate" onClick={generateUpdate} disabled={generating}>
             {generating ? <Loader2 size={14} className="spin" /> : <Activity size={14} />}
