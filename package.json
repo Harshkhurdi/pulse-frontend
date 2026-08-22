@@ -1,7 +1,7 @@
 {
   "name": "pulse_app",
   "engines": {
-    "node": "20.x"
+    "node": "24.x"
   },
   "private": true,
   "version": "0.0.0",
