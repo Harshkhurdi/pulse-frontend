@@ -1,25 +1,21 @@
 import { useState, useEffect } from 'react';
-import { supabase } from './supabaseClient';
+import { onAuthStateChanged } from 'firebase/auth';
+import { auth } from './firebaseClient';
 import Auth from './Auth';
 import PulseApp from './pulse';
 
 export default function App() {
-  const [session, setSession] = useState(null);
+  const [user, setUser] = useState(null);
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
-    // Check for an existing session on mount
-    supabase.auth.getSession().then(({ data: { session } }) => {
-      setSession(session);
+    // Firebase delivers the current auth state on subscribe (covers page
+    // reloads and token refreshes) and pushes changes on login/logout/OAuth.
+    const unsubscribe = onAuthStateChanged(auth, (firebaseUser) => {
+      setUser(firebaseUser);
       setLoading(false);
     });
-
-    // Listen for auth state changes (login, logout, token refresh, OAuth redirect)
-    const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, session) => {
-      setSession(session);
-    });
-
-    return () => subscription.unsubscribe();
+    return () => unsubscribe();
   }, []);
 
   if (loading) {
@@ -262,7 +258,7 @@ export default function App() {
     </>
   );
 
-  if (!session) {
+  if (!user) {
     return (
       <div className="pulse-root" style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', minHeight: '100vh' }}>
         {Branding}
@@ -274,7 +270,7 @@ export default function App() {
   return (
     <div className="pulse-root">
       {Branding}
-      <PulseApp userId={session.user.id} userEmail={session.user.email} />
+      <PulseApp userId={user.uid} userEmail={user.email} />
     </div>
   );
 }

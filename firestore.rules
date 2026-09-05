@@ -1,0 +1,15 @@
+rules_version = '2';
+
+// Pulse Firestore security rules — mirrors the previous Supabase RLS policies:
+// each signed-in user can only read and write their own tasks.
+service cloud.firestore {
+  match /databases/{database}/documents {
+    match /tasks/{taskId} {
+      // A task's owner is fixed at creation; updates can never reassign it.
+      allow read, update, delete: if request.auth != null
+        && request.auth.uid == resource.data.user_id;
+      allow create: if request.auth != null
+        && request.auth.uid == request.resource.data.user_id;
+    }
+  }
+}

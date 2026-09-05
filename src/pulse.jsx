@@ -1,5 +1,16 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
-import { supabase } from './supabaseClient';
+import {
+  collection,
+  deleteDoc,
+  doc,
+  getDocs,
+  query,
+  setDoc,
+  updateDoc,
+  where,
+} from 'firebase/firestore';
+import { signOut } from 'firebase/auth';
+import { auth, db } from './firebaseClient';
 import {
   Activity,
   Plus,
@@ -18,6 +29,7 @@ import {
 import {
   DndContext,
   closestCorners,
+  pointerWithin,
   DragOverlay,
   useDroppable,
   useDraggable,
@@ -40,6 +52,8 @@ const STATUSES = [
   { key: 'done', label: 'Done' },
 ];
 const STATUS_INDEX = Object.fromEntries(STATUSES.map((s, i) => [s.key, i]));
+// Work-in-progress cap: no more than WIP_LIMIT tasks may sit in "In Progress".
+const WIP_LIMIT = 6;
 
 function uid() {
   return Math.random().toString(36).slice(2, 10);
@@ -65,6 +79,18 @@ function relativeTime(iso) {
   const hrs = Math.round(mins / 60);
   if (hrs < 24) return `${hrs}h ago`;
   return `${Math.round(hrs / 24)}d ago`;
+}
+/* Map a Firestore task document to the camelCase shape the UI expects. */
+function mapTask(id, t) {
+  return {
+    id,
+    title: t.title,
+    owner: t.owner,
+    status: t.status,
+    dueDate: t.due_date,
+    notes: t.notes || '',
+    created_at: t.created_at ?? 0,
+  };
 }
 /* ---------------------------------------------------------
    Styles
@@ -275,7 +301,8 @@ function GlobalStyles() {
         display: flex; align-items: center; justify-content: center; gap: 6px;
         margin-top: auto;
       }
-      .add-task-btn:hover { color: var(--live); border-color: var(--live); }
+      .add-task-btn:hover:not(:disabled) { color: var(--live); border-color: var(--live); }
+      .add-task-btn:disabled { opacity: 0.45; cursor: not-allowed; }
 
       .modal-overlay {
         position: fixed; inset: 0; background: rgba(6,8,11,0.7);
@@ -529,12 +556,16 @@ function TaskCard({ task, onEdit, onMove, canMoveLeft, canMoveRight }) {
 /* ---------------------------------------------------------
    Column — @dnd-kit droppable
 --------------------------------------------------------- */
-function Column({ status, tasks, onEdit, onMove, onAdd }) {
+function Column({ status, tasks, onEdit, onMove, onAdd, inProgressCount }) {
   const { setNodeRef, isOver } = useDroppable({
     id: status.key,
   });
 
   const idx = STATUS_INDEX[status.key];
+  const wipFull = status.key === 'inprogress' && tasks.length >= WIP_LIMIT;
+  const prevStatus = STATUSES[idx - 1]?.key;
+  const nextStatus = STATUSES[idx + 1]?.key;
+  const neighborIsFullWip = (s) => s === 'inprogress' && inProgressCount >= WIP_LIMIT;
   const colClasses = [
     'pulse-col',
     status.key === 'blocked' ? 'is-blocked' : '',
@@ -553,12 +584,17 @@ function Column({ status, tasks, onEdit, onMove, onAdd }) {
           task={t}
           onEdit={onEdit}
           onMove={onMove}
-          canMoveLeft={idx > 0}
-          canMoveRight={idx < STATUSES.length - 1}
+          canMoveLeft={idx > 0 && !neighborIsFullWip(prevStatus)}
+          canMoveRight={idx < STATUSES.length - 1 && !neighborIsFullWip(nextStatus)}
         />
       ))}
-      <button className="add-task-btn" onClick={() => onAdd(status.key)}>
-        <Plus size={13} /> Add task
+      <button
+        className="add-task-btn"
+        onClick={() => onAdd(status.key)}
+        disabled={wipFull}
+        title={wipFull ? `WIP limit: max ${WIP_LIMIT} tasks in progress` : undefined}
+      >
+        <Plus size={13} /> {wipFull ? `WIP limit (${WIP_LIMIT})` : 'Add task'}
       </button>
     </div>
   );
@@ -567,7 +603,7 @@ function Column({ status, tasks, onEdit, onMove, onAdd }) {
 /* ---------------------------------------------------------
    Add / edit modal
 --------------------------------------------------------- */
-function TaskModal({ initial, defaultStatus, onSave, onDelete, onClose }) {
+function TaskModal({ initial, defaultStatus, onSave, onDelete, onClose, inProgressFull }) {
   const [title, setTitle] = useState(initial?.title || '');
   const [owner, setOwner] = useState(initial?.owner || '');
   const [status, setStatus] = useState(initial?.status || defaultStatus || 'todo');
@@ -618,7 +654,15 @@ function TaskModal({ initial, defaultStatus, onSave, onDelete, onClose }) {
         <div className="field">
           <label htmlFor="pulse-status">Status</label>
           <select id="pulse-status" value={status} onChange={(e) => setStatus(e.target.value)}>
-            {STATUSES.map((s) => <option key={s.key} value={s.key}>{s.label}</option>)}
+            {STATUSES.map((s) => (
+              <option
+                key={s.key}
+                value={s.key}
+                disabled={s.key === 'inprogress' && inProgressFull && status !== 'inprogress'}
+              >
+                {s.label}
+              </option>
+            ))}
           </select>
         </div>
         <div className="field">
@@ -751,39 +795,37 @@ export default function PulseApp({ userId, userEmail }) {
     })
   );
 
-  /* ---- Fetch tasks from Supabase on mount ---- */
+  /* ---- Pointer-first collision detection: a drop lands in the column the
+     pointer is actually over. closestCorners only fills in when the pointer
+     is outside every column — plain corner-distance math lets a short
+     neighboring column "steal" drops near a tall column's edges. ---- */
+  const collisionDetection = useCallback((args) => {
+    const pointerCollisions = pointerWithin(args);
+    return pointerCollisions.length > 0 ? pointerCollisions : closestCorners(args);
+  }, []);
+
+  /* ---- Fetch tasks from Firestore on mount ---- */
   useEffect(() => {
     if (!userId) return;
     let cancelled = false;
 
     async function fetchTasks() {
       try {
-        const { data, error } = await supabase
-          .from('tasks')
-          .select('*')
-          .eq('user_id', userId)
-          .order('created_at', { ascending: true });
-
-        if (error) {
-          console.error('Pulse DB fetch error:', error);
-          return;
-        }
+        const snap = await getDocs(
+          query(collection(db, 'tasks'), where('user_id', '==', userId))
+        );
 
         if (cancelled) return;
 
-        // Map snake_case DB columns to camelCase frontend properties
-        const mapped = (data || []).map((t) => ({
-          id: t.id,
-          title: t.title,
-          owner: t.owner,
-          status: t.status,
-          dueDate: t.due_date,
-          notes: t.notes || '',
-        }));
+        // Sort by creation time client-side (matches the old ORDER BY created_at
+        // without needing a Firestore composite index).
+        const mapped = snap.docs
+          .map((d) => mapTask(d.id, d.data()))
+          .sort((a, b) => (a.created_at ?? 0) - (b.created_at ?? 0));
 
         setTasks(mapped);
       } catch (err) {
-        console.error('Pulse fetch error:', err);
+        console.error('Pulse DB fetch error:', err);
       } finally {
         if (!cancelled) setReady(true);
       }
@@ -810,13 +852,24 @@ export default function PulseApp({ userId, userEmail }) {
 
   /* ---- Save / Upsert a task (CREATE + UPDATE) ---- */
   const saveTask = useCallback(async (taskData) => {
+    // WIP limit guard — a save may never push In Progress past the cap.
+    const otherInProgress = tasks.filter(
+      (t) => t.status === 'inprogress' && t.id !== taskData.id
+    ).length;
+    if (taskData.status === 'inprogress' && otherInProgress >= WIP_LIMIT) {
+      setModal(null);
+      setSaveError(`WIP limit: no more than ${WIP_LIMIT} tasks can be in progress at once.`);
+      setTimeout(() => setSaveError(null), 4000);
+      return;
+    }
+
     setSaveError(null);
     setModal(null);
 
     try {
-      // Build the DB payload — omit `id` for new tasks (no hyphens = not a valid UUID)
-      // so Supabase auto-generates one via uuid_generate_v4()
-      const dbPayload = {
+      // The id generated by the modal (or the existing task id) doubles as the
+      // Firestore document id, so create and update are the same setDoc call.
+      const payload = {
         user_id: userId,
         title: taskData.title,
         owner: taskData.owner,
@@ -825,29 +878,24 @@ export default function PulseApp({ userId, userEmail }) {
         notes: taskData.notes,
       };
 
-      // Only include `id` if it's a real UUID (contains hyphens, e.g. "550e8400-e29b-...")
-      if (taskData.id && taskData.id.includes('-')) {
-        dbPayload.id = taskData.id;
+      const isNew = !tasks.some((t) => t.id === taskData.id);
+      if (isNew) {
+        payload.created_at = Date.now();
       }
 
-      // Database-first: wait for the response before updating React state
-      const { data, error } = await supabase
-        .from('tasks')
-        .upsert(dbPayload)
-        .select()
-        .single();
+      // Database-first: wait for the write to be acknowledged before updating
+      // React state. merge:true preserves created_at on updates.
+      await setDoc(doc(db, 'tasks', taskData.id), payload, { merge: true });
 
-      if (error) throw error;
-      if (!data) throw new Error('No data returned from database');
-
-      // Map the returned snake_case row back to camelCase for the frontend
+      // Map the stored row back to camelCase for the frontend
       const savedTask = {
-        id: data.id,
-        title: data.title,
-        owner: data.owner,
-        status: data.status,
-        dueDate: data.due_date,
-        notes: data.notes || '',
+        id: taskData.id,
+        title: taskData.title,
+        owner: taskData.owner,
+        status: taskData.status,
+        dueDate: taskData.dueDate,
+        notes: taskData.notes || '',
+        created_at: payload.created_at ?? null,
       };
 
       // Update state with the server-confirmed row
@@ -864,7 +912,7 @@ export default function PulseApp({ userId, userEmail }) {
       // Auto-clear the error after 4 seconds
       setTimeout(() => setSaveError(null), 4000);
     }
-  }, [userId]);
+  }, [userId, tasks]);
 
   /* ---- Delete a task ---- */
   const deleteTask = useCallback(async (id) => {
@@ -874,56 +922,61 @@ export default function PulseApp({ userId, userEmail }) {
     setTasks((prev) => prev.filter((t) => t.id !== id));
     setModal(null);
 
-    const { error } = await supabase
-      .from('tasks')
-      .delete()
-      .eq('id', id)
-      .eq('user_id', userId);
-
-    if (error) {
-      console.error('Pulse delete error:', error);
+    try {
+      await deleteDoc(doc(db, 'tasks', id));
+    } catch (err) {
+      console.error('Pulse delete error:', err);
       // Revert on failure
       setTasks(prevTasks);
     }
-  }, [userId, tasks]);
+  }, [tasks]);
 
   /* ---- Move task via chevron buttons ---- */
   const moveTask = useCallback(async (id, dir) => {
     let newStatus = null;
+    let wipViolation = false;
 
-    setTasks((prev) => prev.map((t) => {
-      if (t.id !== id) return t;
-      const idx = STATUS_INDEX[t.status];
+    setTasks((prev) => {
+      const task = prev.find((t) => t.id === id);
+      if (!task) return prev;
+      const idx = STATUS_INDEX[task.status];
       const next = Math.min(STATUSES.length - 1, Math.max(0, idx + dir));
       newStatus = STATUSES[next].key;
-      return { ...t, status: newStatus };
-    }));
+
+      // WIP limit guard — a move may never push In Progress past the cap.
+      const inProgressCount = prev.filter((t) => t.status === 'inprogress').length;
+      if (
+        newStatus === 'inprogress' &&
+        task.status !== 'inprogress' &&
+        inProgressCount >= WIP_LIMIT
+      ) {
+        wipViolation = true;
+        return prev;
+      }
+
+      return prev.map((t) => (t.id === id ? { ...t, status: newStatus } : t));
+    });
+
+    if (wipViolation) {
+      setSaveError(`WIP limit: no more than ${WIP_LIMIT} tasks can be in progress at once.`);
+      setTimeout(() => setSaveError(null), 4000);
+      return;
+    }
 
     if (newStatus) {
-      const { error } = await supabase
-        .from('tasks')
-        .update({ status: newStatus })
-        .eq('id', id)
-        .eq('user_id', userId);
-
-      if (error) {
-        console.error('Pulse move error:', error);
+      try {
+        await updateDoc(doc(db, 'tasks', id), { status: newStatus });
+      } catch (err) {
+        console.error('Pulse move error:', err);
         // Revert by re-fetching
-        const { data } = await supabase
-          .from('tasks')
-          .select('*')
-          .eq('user_id', userId)
-          .order('created_at', { ascending: true });
-        if (data) {
-          setTasks(data.map((t) => ({
-            id: t.id,
-            title: t.title,
-            owner: t.owner,
-            status: t.status,
-            dueDate: t.due_date,
-            notes: t.notes || '',
-          })));
-        }
+        const snap = await getDocs(
+          query(collection(db, 'tasks'), where('user_id', '==', userId))
+        );
+        setTasks(
+          snap.docs
+            .map((d) => mapTask(d.id, d.data()))
+            .sort((a, b) => (a.created_at ?? 0) - (b.created_at ?? 0))
+        );
       }
     }
   }, [userId]);
@@ -944,6 +997,20 @@ export default function PulseApp({ userId, userEmail }) {
 
     if (!over || active.id === over.id) return;
 
+    // WIP limit guard — reject drops that would overfill In Progress.
+    const dragged = tasks.find((t) => t.id === active.id);
+    const inProgressCount = tasks.filter((t) => t.status === 'inprogress').length;
+    if (
+      over.id === 'inprogress' &&
+      dragged &&
+      dragged.status !== 'inprogress' &&
+      inProgressCount >= WIP_LIMIT
+    ) {
+      setSaveError(`WIP limit: no more than ${WIP_LIMIT} tasks can be in progress at once.`);
+      setTimeout(() => setSaveError(null), 4000);
+      return;
+    }
+
     // Snapshot for reverting on failure
     const prevTasks = [...tasks];
 
@@ -955,13 +1022,7 @@ export default function PulseApp({ userId, userEmail }) {
     );
 
     try {
-      const { error } = await supabase
-        .from('tasks')
-        .update({ status: over.id })
-        .eq('id', active.id)
-        .eq('user_id', userId);
-
-      if (error) throw error;
+      await updateDoc(doc(db, 'tasks', active.id), { status: over.id });
     } catch (err) {
       console.error('DnD DB update error:', err);
       // Revert optimistic update
@@ -992,9 +1053,8 @@ export default function PulseApp({ userId, userEmail }) {
         return `- [${label}] "${t.title}" — Owner: ${t.owner}, Due: ${t.dueDate}${overdueFlag}${t.notes ? `, Note: ${t.notes}` : ''}`;
       }).join('\n');
 
-      // Get the current JWT token for backend authentication
-      const { data: { session } } = await supabase.auth.getSession();
-      const token = session?.access_token;
+      // Get the current Firebase ID token for backend authentication
+      const token = auth.currentUser ? await auth.currentUser.getIdToken() : null;
 
       const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:3001';
       const response = await fetch(`${API_URL}/api/generate-update`, {
@@ -1089,7 +1149,7 @@ export default function PulseApp({ userId, userEmail }) {
           <button className="btn-export" onClick={exportBoardToJSON} title="Export Board to JSON">
             <Download size={14} /> Export JSON
           </button>
-          <button className="btn-logout" onClick={() => supabase.auth.signOut()}>
+          <button className="btn-logout" onClick={() => signOut(auth)}>
             Log out
           </button>
         </div>
@@ -1121,7 +1181,7 @@ export default function PulseApp({ userId, userEmail }) {
 
       <DndContext
         sensors={sensors}
-        collisionDetection={closestCorners}
+        collisionDetection={collisionDetection}
         onDragStart={handleDragStart}
         onDragEnd={handleDragEnd}
         onDragCancel={handleDragCancel}
@@ -1132,6 +1192,7 @@ export default function PulseApp({ userId, userEmail }) {
               key={s.key}
               status={s}
               tasks={tasks.filter((t) => t.status === s.key)}
+              inProgressCount={tasks.filter((t) => t.status === 'inprogress').length}
               onEdit={(t) => setModal({ task: t })}
               onMove={moveTask}
               onAdd={(statusKey) => setModal({ defaultStatus: statusKey })}
@@ -1158,6 +1219,7 @@ export default function PulseApp({ userId, userEmail }) {
         <TaskModal
           initial={modal.task}
           defaultStatus={modal.defaultStatus}
+          inProgressFull={tasks.filter((t) => t.status === 'inprogress').length >= WIP_LIMIT}
           onSave={saveTask}
           onDelete={deleteTask}
           onClose={() => setModal(null)}

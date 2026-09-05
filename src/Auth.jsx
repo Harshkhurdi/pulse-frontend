@@ -1,6 +1,44 @@
 import { useState } from 'react';
-import { supabase } from './supabaseClient';
+import {
+  GoogleAuthProvider,
+  createUserWithEmailAndPassword,
+  signInWithEmailAndPassword,
+  signInWithPopup,
+} from 'firebase/auth';
+import { auth } from './firebaseClient';
 import { Loader2 } from 'lucide-react';
+
+const googleProvider = new GoogleAuthProvider();
+
+function friendlyAuthError(err) {
+  switch (err?.code) {
+    case 'auth/invalid-credential':
+    case 'auth/wrong-password':
+    case 'auth/user-not-found':
+      return 'Invalid email or password.';
+    case 'auth/email-already-in-use':
+      return 'An account with this email already exists. Try logging in instead.';
+    case 'auth/weak-password':
+      return 'Password should be at least 6 characters.';
+    case 'auth/invalid-email':
+      return 'Please enter a valid email address.';
+    case 'auth/too-many-requests':
+      return 'Too many attempts. Please try again in a moment.';
+    case 'auth/popup-closed-by-user':
+    case 'auth/cancelled-popup-request':
+      return 'Google sign-in was cancelled.';
+    case 'auth/popup-blocked':
+      return 'Your browser blocked the sign-in popup. Allow popups and try again.';
+    case 'auth/unauthorized-domain':
+      return 'This domain is not authorized in Firebase Authentication settings.';
+    case 'auth/operation-not-allowed':
+      return 'This sign-in method is not enabled yet in the Firebase console (Authentication → Sign-in method).';
+    case 'auth/network-request-failed':
+      return 'Network error — check your connection and try again.';
+    default:
+      return err?.message || 'Something went wrong. Please try again.';
+  }
+}
 
 function PulseWave({ active = false, width = 56, height = 20 }) {
   return (
@@ -52,15 +90,12 @@ export default function Auth() {
   const handleGoogleLogIn = async () => {
     setError(null);
     setLoading(true);
-    const { error: authError } = await supabase.auth.signInWithOAuth({
-      provider: 'google',
-      options: {
-        redirectTo: window.location.origin,
-      },
-    });
-    setLoading(false);
-    if (authError) {
-      setError(authError.message);
+    try {
+      await signInWithPopup(auth, googleProvider);
+    } catch (err) {
+      setError(friendlyAuthError(err));
+    } finally {
+      setLoading(false);
     }
   };
 
@@ -71,10 +106,12 @@ export default function Auth() {
       return;
     }
     setLoading(true);
-    const { error: authError } = await supabase.auth.signUp({ email, password });
-    setLoading(false);
-    if (authError) {
-      setError(authError.message);
+    try {
+      await createUserWithEmailAndPassword(auth, email.trim(), password);
+    } catch (err) {
+      setError(friendlyAuthError(err));
+    } finally {
+      setLoading(false);
     }
   };
 
@@ -85,10 +122,12 @@ export default function Auth() {
       return;
     }
     setLoading(true);
-    const { error: authError } = await supabase.auth.signInWithPassword({ email, password });
-    setLoading(false);
-    if (authError) {
-      setError(authError.message);
+    try {
+      await signInWithEmailAndPassword(auth, email.trim(), password);
+    } catch (err) {
+      setError(friendlyAuthError(err));
+    } finally {
+      setLoading(false);
     }
   };
 
