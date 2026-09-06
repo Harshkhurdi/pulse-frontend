@@ -1176,9 +1176,15 @@ export default function PulseApp({ userId, userEmail }) {
   const handleDeleteBoard = useCallback(async (id) => {
     if (boards.length <= 1) return;
     try {
-      // Remove the board's tasks first, then the board itself.
+      // Remove the board's tasks first, then the board itself. The query MUST
+      // constrain user_id: Firestore rejects LIST queries it cannot prove
+      // satisfy the rules, and board_id alone doesn't imply task ownership.
       const boardTasks = await getDocs(
-        query(collection(db, 'tasks'), where('board_id', '==', id))
+        query(
+          collection(db, 'tasks'),
+          where('user_id', '==', userId),
+          where('board_id', '==', id)
+        )
       );
       for (const d of boardTasks.docs) await deleteDoc(d.ref);
       await deleteBoardDoc(id);
@@ -1199,7 +1205,7 @@ export default function PulseApp({ userId, userEmail }) {
       );
       setTimeout(() => setSaveError(null), 6000);
     }
-  }, [boards, boardId]);
+  }, [boards, boardId, userId]);
 
   /* ---- Restore the cached AI update (instant panel on return visits).
      The cache key is per-user: a shared key would leak one account's
