@@ -334,10 +334,11 @@ function GlobalStyles() {
       .modal-close:hover { color: var(--ink); }
       .field { margin-bottom: 14px; }
       .field label { display: block; font-size: 11px; font-weight: 600; letter-spacing: 0.06em; text-transform: uppercase; color: var(--muted); margin-bottom: 6px; }
-      .field input, .field select, .field textarea {
+      .field input:not([type="checkbox"]), .field select, .field textarea {
         width: 100%; background: var(--surface-2); border: 1px solid var(--hairline);
         color: var(--ink); padding: 9px 11px; border-radius: var(--radius-sm); font-size: 13.5px;
       }
+      .field input[type="checkbox"] { width: 15px; height: 15px; margin: 0; padding: 0; accent-color: var(--live); cursor: pointer; flex: none; }
       .field textarea { resize: vertical; min-height: 56px; }
       .field input::placeholder, .field textarea::placeholder { color: var(--muted); }
       .modal-row { display: flex; gap: 12px; }
