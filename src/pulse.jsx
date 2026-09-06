@@ -1,9 +1,11 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import {
+  addDoc,
   collection,
   deleteDoc,
   doc,
   getDocs,
+  onSnapshot,
   query,
   setDoc,
   updateDoc,
@@ -11,6 +13,8 @@ import {
 } from 'firebase/firestore';
 import { signOut } from 'firebase/auth';
 import { auth, db } from './firebaseClient';
+import { BoardSwitcher } from './components/BoardSwitcher';
+import { createBoard, deleteBoardDoc, ensureUserBoard } from './lib/boards';
 import {
   Activity,
   Plus,
@@ -25,11 +29,12 @@ import {
   Pencil,
   Trash2,
   Download,
+  History,
 } from 'lucide-react';
 import {
   DndContext,
-  closestCorners,
   pointerWithin,
+  closestCorners,
   DragOverlay,
   useDroppable,
   useDraggable,
@@ -89,6 +94,15 @@ function mapTask(id, t) {
     status: t.status,
     dueDate: t.due_date,
     notes: t.notes || '',
+    priority: t.priority || 'normal',
+    tags: Array.isArray(t.tags) ? t.tags : [],
+    subtasks: Array.isArray(t.subtasks)
+      ? t.subtasks.map((s) => ({
+          id: s.id || uid(),
+          title: s.title || '',
+          done: Boolean(s.done),
+        }))
+      : [],
     created_at: t.created_at ?? 0,
   };
 }
@@ -465,6 +479,60 @@ function GlobalStyles() {
         margin-top: 18px;
       }
 
+      /* ── Board switcher ── */
+      .board-switcher { position: relative; }
+      .board-switcher-btn { display: flex; align-items: center; gap: 6px; background: var(--surface); border: 1px solid var(--hairline); color: var(--ink); padding: 6px 12px; border-radius: var(--radius-md); font-size: 13px; font-weight: 600; transition: border-color .15s ease; }
+      .board-switcher-btn:hover { border-color: var(--live); }
+      .board-switcher-name { max-width: 180px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+      .board-switcher-menu { position: absolute; left: 0; top: calc(100% + 6px); z-index: 40; background: var(--surface); border: 1px solid var(--hairline); border-radius: var(--radius-md); padding: 6px; min-width: 250px; box-shadow: 0 12px 40px rgba(0,0,0,.5); }
+      .board-menu-item { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 8px 10px; border-radius: var(--radius-sm); cursor: pointer; font-size: 13px; color: var(--ink); }
+      .board-menu-item:hover { background: var(--surface-2); }
+      .board-menu-item.is-active { color: var(--live); }
+      .board-menu-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+      .board-menu-delete { background: none; border: none; color: var(--muted); cursor: pointer; padding: 2px; display: flex; border-radius: 4px; }
+      .board-menu-delete:hover:not(:disabled) { color: var(--risk); }
+      .board-menu-delete:disabled { opacity: .3; cursor: default; }
+      .board-new-form { display: flex; gap: 6px; padding: 8px 6px 4px; border-top: 1px solid var(--hairline); margin-top: 4px; }
+      .board-new-form input { flex: 1; background: var(--surface-2); border: 1px solid var(--hairline); color: var(--ink); border-radius: var(--radius-sm); padding: 6px 8px; font-size: 12.5px; outline: none; }
+      .board-new-form button { background: var(--live); color: #06181A; border: none; border-radius: var(--radius-sm); padding: 6px 10px; font-size: 12px; font-weight: 600; cursor: pointer; }
+      .board-new-form button:disabled { opacity: .4; cursor: default; }
+      .board-menu-new { width: 100%; text-align: left; background: none; border: none; color: var(--live); font-size: 12.5px; padding: 8px 10px; cursor: pointer; border-radius: var(--radius-sm); }
+      .board-menu-new:hover { background: var(--surface-2); }
+
+      /* ── Task priority · tags · subtask progress ── */
+      .priority-dot { display: inline-block; width: 7px; height: 7px; border-radius: 50%; margin-right: 6px; }
+      .priority-dot.p-urgent { background: var(--risk); box-shadow: 0 0 6px var(--risk); }
+      .priority-dot.p-high { background: #F5A623; }
+      .priority-dot.p-low { background: var(--muted); opacity: .6; }
+      .task-chips { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 7px; }
+      .tag-chip { font-size: 10px; padding: 1px 7px; border-radius: 999px; background: var(--surface-2); color: var(--muted); letter-spacing: .02em; }
+      .subtask-chip { font-size: 10px; padding: 1px 7px; border-radius: 999px; background: var(--live-dim); color: var(--live); font-weight: 600; }
+      .subtask-chip.all-done { background: rgba(52, 211, 153, .14); color: #34D399; }
+
+      /* ── Modal subtask editor ── */
+      .subtask-list { display: flex; flex-direction: column; gap: 6px; margin-bottom: 8px; }
+      .subtask-row { display: flex; align-items: center; gap: 8px; background: var(--surface-2); border-radius: var(--radius-sm); padding: 6px 8px; }
+      .subtask-row input[type="checkbox"] { accent-color: var(--live); }
+      .subtask-row span { flex: 1; font-size: 13px; }
+      .subtask-row span.subtask-done { text-decoration: line-through; color: var(--muted); }
+      .subtask-remove { background: none; border: none; color: var(--muted); cursor: pointer; display: flex; padding: 2px; }
+      .subtask-remove:hover { color: var(--risk); }
+      .subtask-add-row { display: flex; gap: 6px; }
+      .subtask-add-row input { flex: 1; background: var(--surface-2); border: 1px solid var(--hairline); color: var(--ink); border-radius: var(--radius-sm); padding: 7px 9px; font-size: 12.5px; outline: none; }
+      .subtask-add-row input:focus { border-color: var(--live); }
+      .subtask-add-btn, .suggest-btn { background: var(--surface-2); border: 1px solid var(--hairline); color: var(--ink); border-radius: var(--radius-sm); padding: 7px 10px; font-size: 12px; cursor: pointer; white-space: nowrap; }
+      .suggest-btn { border-color: rgba(65, 214, 224, .4); color: var(--live); }
+      .suggest-btn:hover:not(:disabled) { background: var(--live-dim); }
+      .subtask-add-btn:disabled, .suggest-btn:disabled { opacity: .4; cursor: default; }
+
+      /* ── Report history ── */
+      .history-wrap { position: relative; }
+      .history-btn { display: flex; align-items: center; gap: 5px; background: rgba(65, 214, 224, .12); border: 1px solid rgba(65, 214, 224, .3); color: var(--live); padding: 3px 10px; border-radius: 6px; font-size: 11px; font-weight: 600; cursor: pointer; }
+      .history-menu { position: absolute; right: 0; top: calc(100% + 6px); z-index: 40; background: var(--surface); border: 1px solid var(--hairline); border-radius: var(--radius-md); padding: 6px; width: 330px; max-height: 320px; overflow-y: auto; box-shadow: 0 12px 40px rgba(0,0,0,.5); }
+      .history-item { width: 100%; text-align: left; background: none; border: none; color: var(--ink); padding: 8px 10px; border-radius: var(--radius-sm); cursor: pointer; font-size: 12px; display: flex; flex-direction: column; gap: 2px; }
+      .history-item:hover { background: var(--surface-2); }
+      .history-preview { color: var(--muted); font-size: 11px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
       @media (max-width: 880px) {
         .pulse-board { grid-template-columns: 1fr 1fr; }
         .update-grid { grid-template-columns: 1fr; }
@@ -519,6 +587,12 @@ function TaskCard({ task, onEdit, onMove, canMoveLeft, canMoveRight }) {
     ? { transform: `translate3d(${transform.x}px, ${transform.y}px, 0)` }
     : undefined;
 
+  // Normalize defensively: a task object missing tags/subtasks must never
+  // crash the render (white-screen) — degrade to empty collections.
+  const tags = Array.isArray(task.tags) ? task.tags : [];
+  const subtasks = Array.isArray(task.subtasks) ? task.subtasks : [];
+  const doneCount = subtasks.filter((s) => s.done).length;
+
   return (
     <div
       ref={setNodeRef}
@@ -528,11 +602,31 @@ function TaskCard({ task, onEdit, onMove, canMoveLeft, canMoveRight }) {
       {...attributes}
     >
       <div className="task-top">
-        <div className="task-title">{task.title}</div>
+        <div className="task-title">
+          {task.priority && task.priority !== 'normal' && (
+            <span className={`priority-dot p-${task.priority}`} title={`Priority: ${task.priority}`} />
+          )}
+          {task.title}
+        </div>
         <button className="task-edit-btn" onClick={() => onEdit(task)} aria-label={`Edit ${task.title}`}>
           <Pencil size={13} />
         </button>
       </div>
+      {(tags.length > 0 || subtasks.length > 0) && (
+        <div className="task-chips">
+          {tags.map((tag) => (
+            <span className="tag-chip" key={tag}>#{tag}</span>
+          ))}
+          {subtasks.length > 0 && (
+            <span
+              className={`subtask-chip ${subtasks.every((s) => s.done) ? 'all-done' : ''}`}
+              title="Subtask progress"
+            >
+              {doneCount}/{subtasks.length}
+            </span>
+          )}
+        </div>
+      )}
       <div className="task-meta">
         <span className="task-owner">{task.owner}</span>
         <span className="due mono">{formatDate(task.dueDate)}</span>
@@ -609,6 +703,17 @@ function TaskModal({ initial, defaultStatus, onSave, onDelete, onClose, inProgre
   const [status, setStatus] = useState(initial?.status || defaultStatus || 'todo');
   const [dueDate, setDueDate] = useState(initial?.dueDate || daysFromNow(7));
   const [notes, setNotes] = useState(initial?.notes || '');
+  const [priority, setPriority] = useState(initial?.priority || 'normal');
+  const [tagsInput, setTagsInput] = useState(
+    Array.isArray(initial?.tags) ? initial.tags.join(', ') : '',
+  );
+  const [subtasks, setSubtasks] = useState(
+    Array.isArray(initial?.subtasks)
+      ? initial.subtasks.map((s) => ({ id: s.id || uid(), title: s.title || '', done: Boolean(s.done) }))
+      : [],
+  );
+  const [newSubtask, setNewSubtask] = useState('');
+  const [suggesting, setSuggesting] = useState(false);
   const titleRef = useRef(null);
 
   useEffect(() => { titleRef.current?.focus(); }, []);
@@ -617,6 +722,57 @@ function TaskModal({ initial, defaultStatus, onSave, onDelete, onClose, inProgre
     window.addEventListener('keydown', handler);
     return () => window.removeEventListener('keydown', handler);
   }, [onClose]);
+
+  const parseTags = () =>
+    tagsInput
+      .split(',')
+      .map((t) => t.trim().replace(/^#/, ''))
+      .filter(Boolean)
+      .slice(0, 8);
+
+  const addSubtask = () => {
+    const clean = newSubtask.trim();
+    if (!clean) return;
+    setSubtasks((prev) => [...prev, { id: uid(), title: clean, done: false }]);
+    setNewSubtask('');
+  };
+
+  const toggleSubtask = (id) => {
+    setSubtasks((prev) => prev.map((s) => (s.id === id ? { ...s, done: !s.done } : s)));
+  };
+
+  const removeSubtask = (id) => {
+    setSubtasks((prev) => prev.filter((s) => s.id !== id));
+  };
+
+  /** ✨ AI breakdown: asks the Pulse backend for 3-5 concrete subtasks. */
+  const suggestSubtasks = async () => {
+    if (suggesting) return;
+    setSuggesting(true);
+    try {
+      const token = auth.currentUser ? await auth.currentUser.getIdToken() : null;
+      const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:3001';
+      const response = await fetch(`${API_URL}/api/suggest-subtasks`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          ...(token ? { Authorization: `Bearer ${token}` } : {}),
+        },
+        body: JSON.stringify({ title: title.trim(), notes: notes.trim(), priority }),
+      });
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(data.error || `Server error ${response.status}`);
+      const ideas = (Array.isArray(data.subtasks) ? data.subtasks : [])
+        .map((s) => String(s).trim())
+        .filter(Boolean)
+        .map((s) => ({ id: uid(), title: s, done: false }));
+      if (ideas.length > 0) setSubtasks((prev) => [...prev, ...ideas]);
+    } catch (e) {
+      console.error('Suggest subtasks failed:', e);
+    } finally {
+      setSuggesting(false);
+    }
+  };
 
   const handleSave = () => {
     if (!title.trim()) { titleRef.current?.focus(); return; }
@@ -627,6 +783,9 @@ function TaskModal({ initial, defaultStatus, onSave, onDelete, onClose, inProgre
       status,
       dueDate,
       notes: notes.trim(),
+      priority,
+      tags: parseTags(),
+      subtasks,
     });
   };
 
@@ -665,9 +824,75 @@ function TaskModal({ initial, defaultStatus, onSave, onDelete, onClose, inProgre
             ))}
           </select>
         </div>
+        <div className="modal-row">
+          <div className="field">
+            <label htmlFor="pulse-priority">Priority</label>
+            <select id="pulse-priority" value={priority} onChange={(e) => setPriority(e.target.value)}>
+              <option value="low">Low</option>
+              <option value="normal">Normal</option>
+              <option value="high">High</option>
+              <option value="urgent">Urgent</option>
+            </select>
+          </div>
+          <div className="field">
+            <label htmlFor="pulse-tags">Tags</label>
+            <input
+              id="pulse-tags"
+              value={tagsInput}
+              onChange={(e) => setTagsInput(e.target.value)}
+              placeholder="infra, q4-launch"
+            />
+          </div>
+        </div>
         <div className="field">
           <label htmlFor="pulse-notes">Context {status === 'blocked' ? "(what's blocking it)" : '(optional)'}</label>
           <textarea id="pulse-notes" value={notes} onChange={(e) => setNotes(e.target.value)} placeholder="Anything Pulse should weigh when judging risk" />
+        </div>
+        <div className="field">
+          <label>Subtasks</label>
+          {subtasks.length > 0 && (
+            <div className="subtask-list">
+              {subtasks.map((s) => (
+                <div className="subtask-row" key={s.id}>
+                  <input
+                    type="checkbox"
+                    checked={s.done}
+                    onChange={() => toggleSubtask(s.id)}
+                    aria-label={`Toggle ${s.title}`}
+                  />
+                  <span className={s.done ? 'subtask-done' : ''}>{s.title}</span>
+                  <button
+                    type="button"
+                    className="subtask-remove"
+                    onClick={() => removeSubtask(s.id)}
+                    aria-label={`Remove ${s.title}`}
+                  >
+                    <X size={12} />
+                  </button>
+                </div>
+              ))}
+            </div>
+          )}
+          <div className="subtask-add-row">
+            <input
+              value={newSubtask}
+              onChange={(e) => setNewSubtask(e.target.value)}
+              onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); addSubtask(); } }}
+              placeholder="Add a subtask…"
+            />
+            <button type="button" className="subtask-add-btn" onClick={addSubtask} disabled={!newSubtask.trim()}>
+              Add
+            </button>
+            <button
+              type="button"
+              className="suggest-btn"
+              onClick={() => void suggestSubtasks()}
+              disabled={suggesting || !title.trim()}
+              title="AI: break this task into subtasks"
+            >
+              {suggesting ? 'Thinking…' : '✨ Suggest'}
+            </button>
+          </div>
         </div>
         <div className="modal-actions">
           {initial ? (
@@ -686,8 +911,18 @@ function TaskModal({ initial, defaultStatus, onSave, onDelete, onClose, inProgre
 /* ---------------------------------------------------------
    AI status update panel
 --------------------------------------------------------- */
-function UpdatePanel({ data, loading, error, open, onToggle, generatedAt }) {
+function UpdatePanel({ data, loading, error, open, onToggle, generatedAt, history = [], onLoadHistory }) {
   const [copied, setCopied] = useState(false);
+  const [historyOpen, setHistoryOpen] = useState(false);
+  const historyRef = useRef(null);
+
+  useEffect(() => {
+    const onDoc = (e) => {
+      if (historyRef.current && !historyRef.current.contains(e.target)) setHistoryOpen(false);
+    };
+    document.addEventListener('mousedown', onDoc);
+    return () => document.removeEventListener('mousedown', onDoc);
+  }, []);
 
   const handleCopyUpdate = () => {
     if (!data) return;
@@ -710,9 +945,55 @@ ${(data.atRisk || []).map(r => `- ${r.title}: ${r.reasoning}`).join('\n')}
 
   return (
     <div className="update-panel">
-      <button className="update-header" onClick={onToggle} aria-expanded={open}>
+      <div
+        className="update-header"
+        role="button"
+        tabIndex={0}
+        onClick={onToggle}
+        onKeyDown={(e) => {
+          if (e.key === 'Enter' || e.key === ' ') {
+            e.preventDefault();
+            onToggle();
+          }
+        }}
+        aria-expanded={open}
+      >
         <span className="update-title"><Activity size={14} /> Status update</span>
         <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
+          {history.length > 0 && (
+            <div className="history-wrap" ref={historyRef}>
+              <button
+                className="history-btn"
+                onClick={(e) => { e.stopPropagation(); setHistoryOpen((o) => !o); }}
+                title="Past reports"
+              >
+                <History size={12} /> History
+              </button>
+              {historyOpen && (
+                <div className="history-menu">
+                  {history.map((h) => (
+                    <button
+                      key={h.id}
+                      className="history-item"
+                      onClick={(e) => {
+                        // stopPropagation: the history menu lives inside the
+                        // header button, so a bubbling click would hit the
+                        // header's onToggle and instantly re-collapse the panel.
+                        e.stopPropagation();
+                        onLoadHistory(h.payload, h.created_at);
+                        setHistoryOpen(false);
+                      }}
+                    >
+                      {new Date(h.created_at).toLocaleString([], {
+                        month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit',
+                      })}
+                      <span className="history-preview">{(h.payload?.summary || '').slice(0, 46)}…</span>
+                    </button>
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
           {data ? (
             <button
               onClick={(e) => { e.stopPropagation(); handleCopyUpdate(); }}
@@ -732,7 +1013,7 @@ ${(data.atRisk || []).map(r => `- ${r.title}: ${r.reasoning}`).join('\n')}
           ) : null}
           {generatedAt ? <span className="update-meta mono">Updated {relativeTime(generatedAt)}</span> : null}
         </div>
-      </button>
+      </div>
       {open ? (
         <div className="update-body">
           {loading ? (
@@ -777,6 +1058,8 @@ ${(data.atRisk || []).map(r => `- ${r.title}: ${r.reasoning}`).join('\n')}
 export default function PulseApp({ userId, userEmail }) {
   const [tasks, setTasks] = useState([]);
   const [ready, setReady] = useState(false);
+  const [boards, setBoards] = useState([]);
+  const [boardId, setBoardId] = useState(() => localStorage.getItem('pulse:board') || null);
   const [modal, setModal] = useState(null);
   const [generating, setGenerating] = useState(false);
   const [updateData, setUpdateData] = useState(null);
@@ -785,6 +1068,7 @@ export default function PulseApp({ userId, userEmail }) {
   const [panelOpen, setPanelOpen] = useState(false);
   const [saveError, setSaveError] = useState(null);
   const [activeDragTask, setActiveDragTask] = useState(null);
+  const [reportHistory, setReportHistory] = useState([]);
 
   /* ---- Pointer sensor config (touch-friendly) ---- */
   const sensors = useSensors(
@@ -804,36 +1088,125 @@ export default function PulseApp({ userId, userEmail }) {
     return pointerCollisions.length > 0 ? pointerCollisions : closestCorners(args);
   }, []);
 
-  /* ---- Fetch tasks from Firestore on mount ---- */
+  /* ---- Board bootstrap: guarantee at least one board; claim legacy tasks ---- */
   useEffect(() => {
     if (!userId) return;
     let cancelled = false;
-
-    async function fetchTasks() {
+    (async () => {
       try {
-        const snap = await getDocs(
-          query(collection(db, 'tasks'), where('user_id', '==', userId))
-        );
-
+        const boards = await ensureUserBoard(userId);
         if (cancelled) return;
+        setBoards(boards);
+        const stored = localStorage.getItem('pulse:board');
+        setBoardId(boards.some((b) => b.id === stored) ? stored : boards[0].id);
+      } catch (err) {
+        console.error('Pulse board bootstrap failed:', err);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [userId]);
 
-        // Sort by creation time client-side (matches the old ORDER BY created_at
-        // without needing a Firestore composite index).
+  /* ---- Live sync: subscribe to the active board's tasks (onSnapshot).
+     Every write anywhere (this tab, another tab, another device) lands
+     here within milliseconds — no manual refresh. ---- */
+  useEffect(() => {
+    if (!userId || !boardId) return;
+    const q = query(
+      collection(db, 'tasks'),
+      where('user_id', '==', userId),
+      where('board_id', '==', boardId)
+    );
+    const unsub = onSnapshot(
+      q,
+      (snap) => {
         const mapped = snap.docs
           .map((d) => mapTask(d.id, d.data()))
           .sort((a, b) => (a.created_at ?? 0) - (b.created_at ?? 0));
-
         setTasks(mapped);
-      } catch (err) {
-        console.error('Pulse DB fetch error:', err);
-      } finally {
-        if (!cancelled) setReady(true);
+        setReady(true);
+      },
+      (err) => {
+        console.error('Pulse live sync error:', err);
+        setReady(true);
       }
-    }
+    );
+    return () => unsub();
+  }, [userId, boardId]);
 
-    // Load previously cached AI update from localStorage (optional)
+  /* ---- Report history for the active board ---- */
+  useEffect(() => {
+    if (!userId || !boardId) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const snap = await getDocs(
+          query(collection(db, 'reports'), where('user_id', '==', userId))
+        );
+        if (cancelled) return;
+        const list = snap.docs
+          .map((d) => ({ id: d.id, ...(d.data()) }))
+          .filter((r) => r.board_id === boardId)
+          .sort((a, b) => b.created_at - a.created_at)
+          .slice(0, 8);
+        setReportHistory(list);
+      } catch {
+        // History is a convenience — never block the board on it.
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [userId, boardId, generatedAt]);
+
+  /* ---- Board management ---- */
+  const handleCreateBoard = useCallback(async (name) => {
     try {
-      const upd = localStorage.getItem('pulse:update');
+      const board = await createBoard(userId, name);
+      setBoards((prev) => [...prev, board]);
+      setBoardId(board.id);
+      localStorage.setItem('pulse:board', board.id);
+    } catch (err) {
+      console.error('Pulse board create failed:', err);
+    }
+  }, [userId]);
+
+  const handleSelectBoard = useCallback((id) => {
+    setBoardId(id);
+    localStorage.setItem('pulse:board', id);
+  }, []);
+
+  const handleDeleteBoard = useCallback(async (id) => {
+    if (boards.length <= 1) return;
+    try {
+      // Remove the board's tasks first, then the board itself.
+      const boardTasks = await getDocs(
+        query(collection(db, 'tasks'), where('board_id', '==', id))
+      );
+      for (const d of boardTasks.docs) await deleteDoc(d.ref);
+      await deleteBoardDoc(id);
+      const next = boards.filter((b) => b.id !== id);
+      setBoards(next);
+      if (id === boardId) {
+        setBoardId(next[0].id);
+        localStorage.setItem('pulse:board', next[0].id);
+        setTasks([]);
+        setReady(false);
+      }
+    } catch (err) {
+      console.error('Pulse board delete failed:', err);
+      setSaveError(
+        err?.code === 'permission-denied'
+          ? 'Firestore rules blocked board deletion — publish the latest firestore.rules in the Firebase console and retry.'
+          : err?.message || 'Failed to delete the board. Please try again.'
+      );
+      setTimeout(() => setSaveError(null), 6000);
+    }
+  }, [boards, boardId]);
+
+  /* ---- Restore the cached AI update (instant panel on return visits).
+     The cache key is per-user: a shared key would leak one account's
+     report into the next account logged in on the same browser. ---- */
+  useEffect(() => {
+    try {
+      const upd = localStorage.getItem(`pulse:update:${userId}`);
       if (upd) {
         const parsed = JSON.parse(upd);
         // This restores persisted UI state once after the component mounts.
@@ -842,12 +1215,12 @@ export default function PulseApp({ userId, userEmail }) {
         setGeneratedAt(parsed.generatedAt);
         setPanelOpen(true);
       }
+      // Migration: drop the pre-per-user cache, which could belong to a
+      // different account than the one now signed in.
+      localStorage.removeItem('pulse:update');
     } catch {
-      // Ignore a malformed cache and fetch fresh data instead.
+      // Ignore a malformed cache.
     }
-
-    fetchTasks();
-    return () => { cancelled = true; };
   }, [userId]);
 
   /* ---- Save / Upsert a task (CREATE + UPDATE) ---- */
@@ -871,11 +1244,17 @@ export default function PulseApp({ userId, userEmail }) {
       // Firestore document id, so create and update are the same setDoc call.
       const payload = {
         user_id: userId,
+        board_id: boardId,
         title: taskData.title,
         owner: taskData.owner,
         status: taskData.status,
         due_date: taskData.dueDate,
         notes: taskData.notes,
+        priority: taskData.priority || 'normal',
+        tags: Array.isArray(taskData.tags) ? taskData.tags : [],
+        subtasks: Array.isArray(taskData.subtasks)
+          ? taskData.subtasks.map((s) => ({ id: s.id, title: s.title, done: Boolean(s.done) }))
+          : [],
       };
 
       const isNew = !tasks.some((t) => t.id === taskData.id);
@@ -887,7 +1266,8 @@ export default function PulseApp({ userId, userEmail }) {
       // React state. merge:true preserves created_at on updates.
       await setDoc(doc(db, 'tasks', taskData.id), payload, { merge: true });
 
-      // Map the stored row back to camelCase for the frontend
+      // Map the stored row back to the full camelCase shape the UI expects
+      // (same defaults as mapTask — a partial object here crashes TaskCard).
       const savedTask = {
         id: taskData.id,
         title: taskData.title,
@@ -895,6 +1275,11 @@ export default function PulseApp({ userId, userEmail }) {
         status: taskData.status,
         dueDate: taskData.dueDate,
         notes: taskData.notes || '',
+        priority: taskData.priority || 'normal',
+        tags: Array.isArray(taskData.tags) ? taskData.tags : [],
+        subtasks: Array.isArray(taskData.subtasks)
+          ? taskData.subtasks.map((s) => ({ id: s.id, title: s.title, done: Boolean(s.done) }))
+          : [],
         created_at: payload.created_at ?? null,
       };
 
@@ -912,7 +1297,7 @@ export default function PulseApp({ userId, userEmail }) {
       // Auto-clear the error after 4 seconds
       setTimeout(() => setSaveError(null), 4000);
     }
-  }, [userId, tasks]);
+  }, [userId, boardId, tasks]);
 
   /* ---- Delete a task ---- */
   const deleteTask = useCallback(async (id) => {
@@ -1029,7 +1414,7 @@ export default function PulseApp({ userId, userEmail }) {
       setTasks(prevTasks);
       alert('Failed to update task status. Please try again.');
     }
-  }, [userId, tasks]);
+  }, [tasks]);
 
   /* ---- @dnd-kit drag cancel ---- */
   const handleDragCancel = useCallback(() => {
@@ -1050,7 +1435,14 @@ export default function PulseApp({ userId, userEmail }) {
       const boardText = tasks.map((t) => {
         const label = STATUSES.find((s) => s.key === t.status)?.label;
         const overdueFlag = isOverdue(t.dueDate, t.status) ? ' [PAST DUE]' : '';
-        return `- [${label}] "${t.title}" — Owner: ${t.owner}, Due: ${t.dueDate}${overdueFlag}${t.notes ? `, Note: ${t.notes}` : ''}`;
+        const priorityFlag = t.priority && t.priority !== 'normal' ? ` (priority: ${t.priority})` : '';
+        const tags = Array.isArray(t.tags) ? t.tags : [];
+        const subtasks = Array.isArray(t.subtasks) ? t.subtasks : [];
+        const tagFlag = tags.length ? ` #${tags.join(' #')}` : '';
+        const subtaskFlag = subtasks.length
+          ? `, subtasks ${subtasks.filter((s) => s.done).length}/${subtasks.length} complete`
+          : '';
+        return `- [${label}] "${t.title}"${priorityFlag}${tagFlag} — Owner: ${t.owner}, Due: ${t.dueDate}${overdueFlag}${subtaskFlag}${t.notes ? `, Note: ${t.notes}` : ''}`;
       }).join('\n');
 
       // Get the current Firebase ID token for backend authentication
@@ -1074,12 +1466,24 @@ export default function PulseApp({ userId, userEmail }) {
       const parsed = await response.json();
 
       setUpdateData(parsed);
-      const ts = new Date().toISOString();
+      const ts = Date.now();
       setGeneratedAt(ts);
       try {
-        localStorage.setItem('pulse:update', JSON.stringify({ data: parsed, generatedAt: ts }));
+        localStorage.setItem(`pulse:update:${userId}`, JSON.stringify({ data: parsed, generatedAt: ts }));
       } catch {
         // Caching is optional; the generated update remains visible.
+      }
+
+      // Archive the report so the History dropdown can recall it later.
+      try {
+        await addDoc(collection(db, 'reports'), {
+          user_id: userId,
+          board_id: boardId,
+          created_at: ts,
+          payload: parsed,
+        });
+      } catch (err) {
+        console.warn('Pulse report archive skipped:', err?.message);
       }
     } catch (e) {
       console.error("Pulse API Failure:", e);
@@ -1134,6 +1538,16 @@ export default function PulseApp({ userId, userEmail }) {
         <div className="pulse-brand">
           <span className="pulse-wordmark display">Pulse</span>
           <PulseWave width={48} height={18} />
+          {boards.length > 0 && (
+            <BoardSwitcher
+              boards={boards}
+              currentId={boardId}
+              onSelect={handleSelectBoard}
+              onCreate={handleCreateBoard}
+              onDelete={handleDeleteBoard}
+              canDelete={() => boards.length > 1}
+            />
+          )}
         </div>
         <div className="pulse-actions">
           {userEmail ? (
@@ -1177,6 +1591,12 @@ export default function PulseApp({ userId, userEmail }) {
         open={panelOpen}
         onToggle={() => setPanelOpen((o) => !o)}
         generatedAt={generatedAt}
+        history={reportHistory}
+        onLoadHistory={(payload, createdAt) => {
+          setUpdateData(payload);
+          setGeneratedAt(createdAt);
+          setPanelOpen(true);
+        }}
       />
 
       <DndContext

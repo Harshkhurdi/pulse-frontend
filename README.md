@@ -31,7 +31,9 @@ VITE_API_URL=http://localhost:3001
 ### 3. Firebase Console Setup (one time)
 1. **Authentication → Sign-in method**: enable **Email/Password** and **Google**.
 2. **Firestore Database**: create a database (Production mode).
-3. **Firestore → Rules**: paste the contents of `firestore.rules` from this repo and publish — each user can then only read/write their own tasks.
+3. **Firestore → Rules**: paste the contents of `firestore.rules` from this repo and publish — each user can then only read/write their own tasks, boards, and reports.
+
+> **Important:** the rules file must be re-published in the Firebase console whenever `firestore.rules` changes in this repo. If the deployed rules are older than the repo copy, operations allowed by the repo rules (e.g. deleting a board) fail with `permission-denied` in the app.
 
 ### 4. Start Development Server
 ```bash

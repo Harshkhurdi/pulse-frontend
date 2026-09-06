@@ -1,11 +1,28 @@
 rules_version = '2';
 
-// Pulse Firestore security rules — mirrors the previous Supabase RLS policies:
-// each signed-in user can only read and write their own tasks.
+// Pulse Firestore security rules.
+// - tasks:    personal kanban cards (user_id == caller's uid)
+// - boards:   personal workspaces (owner_id == caller's uid)
+// - reports:  AI status-update history (user_id == caller's uid)
 service cloud.firestore {
   match /databases/{database}/documents {
+
     match /tasks/{taskId} {
       // A task's owner is fixed at creation; updates can never reassign it.
+      allow read, update, delete: if request.auth != null
+        && request.auth.uid == resource.data.user_id;
+      allow create: if request.auth != null
+        && request.auth.uid == request.resource.data.user_id;
+    }
+
+    match /boards/{boardId} {
+      allow read, update, delete: if request.auth != null
+        && request.auth.uid == resource.data.owner_id;
+      allow create: if request.auth != null
+        && request.auth.uid == request.resource.data.owner_id;
+    }
+
+    match /reports/{reportId} {
       allow read, update, delete: if request.auth != null
         && request.auth.uid == resource.data.user_id;
       allow create: if request.auth != null
